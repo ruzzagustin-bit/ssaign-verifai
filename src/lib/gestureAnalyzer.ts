@@ -2,11 +2,20 @@ import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import type { FingerState, FslSign } from "@/data/fslSigns";
 import type { Language } from "@/lib/i18n";
 
+export type FingerKey = "thumb" | "index" | "middle" | "ring" | "pinky";
+
+export interface FingerMatchStatus {
+  key: FingerKey;
+  label: string;
+  ok: boolean;
+}
+
 export interface AnalysisResult {
   matched: boolean;
   confidence: number;
   feedbackCode: string;
   feedbackMessage: string;
+  fingerStatuses: FingerMatchStatus[];
 }
 
 function dist(a: NormalizedLandmark, b: NormalizedLandmark): number {
@@ -27,7 +36,7 @@ function isFingerExtended(
   const pipToWrist = dist(lm[pipIdx], wrist);
   const tipToMcp = dist(lm[tipIdx], lm[mcpIdx]);
   const pipToMcp = dist(lm[pipIdx], lm[mcpIdx]);
-  return tipToWrist > pipToWrist * 1.1 && tipToMcp > pipToMcp * 1.05;
+  return tipToWrist > pipToWrist * 1.08 && tipToMcp > pipToMcp * 1.04;
 }
 
 function isThumbExtended(lm: NormalizedLandmark[], palmSize: number): boolean {
@@ -36,9 +45,9 @@ function isThumbExtended(lm: NormalizedLandmark[], palmSize: number): boolean {
   const middleMcp = lm[9];
   const indexMcp = lm[5];
 
-  const farFromPinky = dist(thumbTip, pinkyMcp) > palmSize * 1.05;
-  const awayFromCenter = dist(thumbTip, middleMcp) > palmSize * 0.68;
-  const awayFromIndex = dist(thumbTip, indexMcp) > palmSize * 0.45;
+  const farFromPinky = dist(thumbTip, pinkyMcp) > palmSize * 1.02;
+  const awayFromCenter = dist(thumbTip, middleMcp) > palmSize * 0.66;
+  const awayFromIndex = dist(thumbTip, indexMcp) > palmSize * 0.44;
   return farFromPinky && (awayFromCenter || awayFromIndex);
 }
 
@@ -47,7 +56,6 @@ function getOrientation(
   palmSize: number
 ): "up" | "down" | "side" {
   const wrist = lm[0];
-  // Use middle MCP + index tip blend so pointing gestures reflect hand tilt
   const refX = (lm[9].x + lm[8].x) / 2;
   const refY = (lm[9].y + lm[8].y) / 2;
   const dx = refX - wrist.x;
@@ -57,6 +65,20 @@ function getOrientation(
     return "side";
   }
   return dy > palmSize * 0.2 ? "down" : "up";
+}
+
+export function smoothLandmarks(
+  prev: NormalizedLandmark[] | null,
+  curr: NormalizedLandmark[],
+  alpha = 0.55
+): NormalizedLandmark[] {
+  if (!prev || prev.length !== curr.length) return curr;
+  return curr.map((pt, idx) => ({
+    x: prev[idx].x * (1 - alpha) + pt.x * alpha,
+    y: prev[idx].y * (1 - alpha) + pt.y * alpha,
+    z: (prev[idx].z ?? 0) * (1 - alpha) + (pt.z ?? 0) * alpha,
+    visibility: pt.visibility,
+  }));
 }
 
 export function computeMotionAmount(
@@ -73,15 +95,12 @@ export function computeMotionAmount(
   return movement / palmSize;
 }
 
-const FINGER_NAMES: Record<
-  "thumb" | "index" | "middle" | "ring" | "pinky",
-  { en: string; fil: string }
-> = {
-  thumb: { en: "thumb", fil: "hinlalaki" },
-  index: { en: "index finger", fil: "hintuturo" },
-  middle: { en: "middle finger", fil: "hinlalato" },
-  ring: { en: "ring finger", fil: "palasingsingan" },
-  pinky: { en: "pinky finger", fil: "hinliliit" },
+const FINGER_NAMES: Record<FingerKey, { en: string; fil: string }> = {
+  thumb: { en: "Thumb", fil: "Hinlalaki" },
+  index: { en: "Index", fil: "Hintuturo" },
+  middle: { en: "Middle", fil: "Hinlalato" },
+  ring: { en: "Ring", fil: "Palasingsingan" },
+  pinky: { en: "Pinky", fil: "Hinliliit" },
 };
 
 export function analyzeGesture(
@@ -91,6 +110,8 @@ export function analyzeGesture(
   lang: Language
 ): AnalysisResult {
   const palmSize = dist(lm[0], lm[9]);
+  const fingerKeys: FingerKey[] = ["thumb", "index", "middle", "ring", "pinky"];
+
   if (palmSize < 0.01) {
     return {
       matched: false,
@@ -100,10 +121,15 @@ export function analyzeGesture(
         lang === "en"
           ? "Move your hand slightly closer to the camera."
           : "Ilapit nang kaunti ang iyong kamay sa kamera.",
+      fingerStatuses: fingerKeys.map((k) => ({
+        key: k,
+        label: FINGER_NAMES[k][lang],
+        ok: false,
+      })),
     };
   }
 
-  const detected: Record<"thumb" | "index" | "middle" | "ring" | "pinky", boolean> = {
+  const detected: Record<FingerKey, boolean> = {
     thumb: isThumbExtended(lm, palmSize),
     index: isFingerExtended(lm, 5, 6, 8),
     middle: isFingerExtended(lm, 9, 10, 12),
@@ -112,14 +138,6 @@ export function analyzeGesture(
   };
 
   const p = sign.profile;
-  const fingerKeys: Array<"thumb" | "index" | "middle" | "ring" | "pinky"> = [
-    "thumb",
-    "index",
-    "middle",
-    "ring",
-    "pinky",
-  ];
-
   let totalChecks = 0;
   let passedChecks = 0;
   let firstErrorCode = "";
@@ -132,29 +150,49 @@ export function analyzeGesture(
     }
   };
 
-  for (const key of fingerKeys) {
+  const fingerStatuses: FingerMatchStatus[] = fingerKeys.map((key) => {
     const expected: FingerState = p[key];
-    if (expected === "any") continue;
+    if (expected === "any") {
+      return { key, label: FINGER_NAMES[key][lang], ok: true };
+    }
     totalChecks++;
     const actual = detected[key];
     const shouldBeExtended = expected === "extended";
-    if (actual === shouldBeExtended) {
+    const ok = actual === shouldBeExtended;
+
+    if (ok) {
       passedChecks++;
     } else {
-      const fname = FINGER_NAMES[key];
+      const fname = FINGER_NAMES[key][lang].toLowerCase();
       if (shouldBeExtended) {
         recordError(
           `extend_${key}`,
-          `Extend your ${fname.en}.`,
-          `Itaas o ituwid ang iyong ${fname.fil}.`
+          `Extend your ${fname} finger.`,
+          `Itaas o ituwid ang iyong ${fname}.`
         );
       } else {
         recordError(
           `curl_${key}`,
-          `Curl or tuck your ${fname.en}.`,
-          `Ibaluktot o itiklop ang iyong ${fname.fil}.`
+          `Curl or tuck your ${fname} finger.`,
+          `Ibaluktot o itiklop ang iyong ${fname}.`
         );
       }
+    }
+    return { key, label: FINGER_NAMES[key][lang], ok };
+  });
+
+  // Extra distinction for Letter C (curved open gap between thumb & index)
+  if (sign.slug === "alphabet-c") {
+    totalChecks++;
+    const gap = dist(lm[4], lm[8]) / palmSize;
+    if (gap > 0.36 && gap < 1.35) {
+      passedChecks++;
+    } else {
+      recordError(
+        "shape_c_gap",
+        "Keep a rounded C-shaped opening between your thumb and fingers.",
+        "Panatilihing bukas at pakurbang hugis C ang agwat ng hinlalaki at mga daliri."
+      );
     }
   }
 
@@ -175,7 +213,7 @@ export function analyzeGesture(
   if (typeof p.spreadIndexMiddle === "boolean") {
     totalChecks++;
     const spreadDist = dist(lm[8], lm[12]) / palmSize;
-    const isSpread = spreadDist > 0.38;
+    const isSpread = spreadDist > 0.36;
     if (isSpread === p.spreadIndexMiddle) {
       passedChecks++;
     } else if (p.spreadIndexMiddle) {
@@ -240,5 +278,6 @@ export function analyzeGesture(
         (lang === "en"
           ? "Adjust your handshape to match the reference."
           : "Isaayos ang hugis ng kamay ayon sa gabay."),
+    fingerStatuses,
   };
 }

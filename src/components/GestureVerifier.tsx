@@ -6,10 +6,23 @@ import {
   HandLandmarker,
   type NormalizedLandmark,
 } from "@mediapipe/tasks-vision";
-import { Camera, CameraOff, CheckCircle2, Loader2, Sparkles } from "lucide-react";
+import {
+  ArrowRight,
+  Camera,
+  CameraOff,
+  CheckCircle2,
+  Loader2,
+  RotateCcw,
+  Sparkles,
+} from "lucide-react";
 import type { FslSign } from "@/data/fslSigns";
 import { translations, type Language } from "@/lib/i18n";
-import { analyzeGesture, computeMotionAmount } from "@/lib/gestureAnalyzer";
+import {
+  analyzeGesture,
+  computeMotionAmount,
+  smoothLandmarks,
+  type FingerMatchStatus,
+} from "@/lib/gestureAnalyzer";
 import { supabase } from "@/lib/supabase";
 
 const HAND_CONNECTIONS: Array<[number, number]> = [
@@ -27,7 +40,25 @@ interface GestureVerifierProps {
   sessionId: string;
   isAlreadyVerified: boolean;
   onVerified: (slug: string) => void;
+  onNextSign?: () => void;
 }
+
+const DEFAULT_FINGERS: Record<Language, FingerMatchStatus[]> = {
+  en: [
+    { key: "thumb", label: "Thumb", ok: false },
+    { key: "index", label: "Index", ok: false },
+    { key: "middle", label: "Middle", ok: false },
+    { key: "ring", label: "Ring", ok: false },
+    { key: "pinky", label: "Pinky", ok: false },
+  ],
+  fil: [
+    { key: "thumb", label: "Hinlalaki", ok: false },
+    { key: "index", label: "Hintuturo", ok: false },
+    { key: "middle", label: "Hinlalato", ok: false },
+    { key: "ring", label: "Palasingsingan", ok: false },
+    { key: "pinky", label: "Hinliliit", ok: false },
+  ],
+};
 
 export default function GestureVerifier({
   sign,
@@ -35,6 +66,7 @@ export default function GestureVerifier({
   sessionId,
   isAlreadyVerified,
   onVerified,
+  onNextSign,
 }: GestureVerifierProps) {
   const t = translations[lang];
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -43,6 +75,7 @@ export default function GestureVerifier({
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
 
+  const smoothedLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
   const prevLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
   const motionWindowRef = useRef<number[]>([]);
   const streakRef = useRef<number>(0);
@@ -56,10 +89,12 @@ export default function GestureVerifier({
   const [confidence, setConfidence] = useState(0);
   const [holdPercent, setHoldPercent] = useState(0);
   const [feedback, setFeedback] = useState<string>(t.noHandDetected);
+  const [fingerStatuses, setFingerStatuses] = useState<FingerMatchStatus[]>(
+    DEFAULT_FINGERS[lang]
+  );
   const [justVerified, setJustVerified] = useState(false);
 
-  // Reset per-sign counters whenever the user picks a different sign
-  useEffect(() => {
+  const resetSignPractice = () => {
     streakRef.current = 0;
     motionWindowRef.current = [];
     verifiedCurrentSignRef.current = false;
@@ -67,8 +102,14 @@ export default function GestureVerifier({
     setHoldPercent(0);
     setConfidence(0);
     setJustVerified(false);
+    setFingerStatuses(DEFAULT_FINGERS[lang]);
     setFeedback(cameraOn ? t.noHandDetected : t.cameraReady);
-  }, [sign.slug, cameraOn, t.noHandDetected, t.cameraReady]);
+  };
+
+  useEffect(() => {
+    resetSignPractice();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sign.slug, cameraOn, lang]);
 
   const stopCamera = () => {
     if (rafRef.current) {
@@ -86,9 +127,12 @@ export default function GestureVerifier({
     if (ctx && canvasRef.current) {
       ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
     }
+    smoothedLandmarksRef.current = null;
+    prevLandmarksRef.current = null;
     setCameraOn(false);
     setHoldPercent(0);
     setConfidence(0);
+    setFingerStatuses(DEFAULT_FINGERS[lang]);
   };
 
   useEffect(() => {
@@ -96,6 +140,7 @@ export default function GestureVerifier({
       stopCamera();
       landmarkerRef.current?.close();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const logAttempt = async (
@@ -115,7 +160,8 @@ export default function GestureVerifier({
       matched,
       confidence: Number(conf.toFixed(4)),
       feedback_code: feedbackCode,
-      response_ms: signStartTimeRef.current > 0 ? now - signStartTimeRef.current : 0,
+      response_ms:
+        signStartTimeRef.current > 0 ? now - signStartTimeRef.current : 0,
     });
   };
 
@@ -127,7 +173,6 @@ export default function GestureVerifier({
     isMatch: boolean
   ) => {
     ctx.save();
-    // Mirror horizontally to match mirrored webcam preview
     ctx.translate(width, 0);
     ctx.scale(-1, 1);
 
@@ -196,6 +241,7 @@ export default function GestureVerifier({
         await videoRef.current.play();
       }
 
+      signStartTimeRef.current = Date.now();
       setCameraOn(true);
       setLoadingModel(false);
 
@@ -227,7 +273,10 @@ export default function GestureVerifier({
           }
 
           if (result.landmarks && result.landmarks.length > 0) {
-            const lm = result.landmarks[0];
+            const rawLm = result.landmarks[0];
+            const lm = smoothLandmarks(smoothedLandmarksRef.current, rawLm, 0.55);
+            smoothedLandmarksRef.current = lm;
+
             const instantMotion = computeMotionAmount(prevLandmarksRef.current, lm);
             prevLandmarksRef.current = lm;
 
@@ -240,6 +289,7 @@ export default function GestureVerifier({
             const analysis = analyzeGesture(lm, sign, peakMotion, lang);
             setConfidence(Math.round(analysis.confidence * 100));
             setFeedback(analysis.feedbackMessage);
+            setFingerStatuses(analysis.fingerStatuses);
 
             if (ctx) {
               drawLandmarks(ctx, lm, canvas.width, canvas.height, analysis.matched);
@@ -267,10 +317,12 @@ export default function GestureVerifier({
               }
             }
           } else {
+            smoothedLandmarksRef.current = null;
             prevLandmarksRef.current = null;
             streakRef.current = 0;
             setHoldPercent(0);
             setConfidence(0);
+            setFingerStatuses(DEFAULT_FINGERS[lang]);
             setFeedback(t.noHandDetected);
           }
         }
@@ -302,7 +354,7 @@ export default function GestureVerifier({
             type="button"
             onClick={startCamera}
             disabled={loadingModel}
-            className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-800 disabled:opacity-60"
+            className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-blue-800 disabled:opacity-60"
           >
             {loadingModel ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -324,7 +376,11 @@ export default function GestureVerifier({
       </div>
 
       {/* Camera Viewport */}
-      <div className="relative aspect-video w-full overflow-hidden rounded-xl bg-slate-950">
+      <div
+        className={`relative aspect-video w-full overflow-hidden rounded-xl bg-slate-950 transition-all ${
+          justVerified ? "ring-4 ring-emerald-400" : ""
+        }`}
+      >
         <video
           ref={videoRef}
           playsInline
@@ -345,7 +401,40 @@ export default function GestureVerifier({
           </div>
         )}
 
-        {(justVerified || isAlreadyVerified) && (
+        {/* Deaf-accessible Visual Celebration Overlay */}
+        {justVerified && (
+          <div className="absolute inset-x-3 bottom-3 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-emerald-600/95 px-4 py-3 text-white shadow-lg backdrop-blur-sm">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-6 w-6 shrink-0 animate-bounce" />
+              <div>
+                <p className="text-sm font-bold">{t.verifiedTitle}</p>
+                <p className="text-xs text-emerald-100">{t.verifiedSub}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={resetSignPractice}
+                className="inline-flex items-center gap-1 rounded-lg bg-white/20 px-2.5 py-1.5 text-xs font-semibold hover:bg-white/30"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                {lang === "en" ? "Retry" : "Ulitin"}
+              </button>
+              {onNextSign && (
+                <button
+                  type="button"
+                  onClick={onNextSign}
+                  className="inline-flex items-center gap-1 rounded-lg bg-white px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-50"
+                >
+                  {t.nextSign}
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!justVerified && isAlreadyVerified && (
           <div className="absolute top-3 right-3 inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-3 py-1 text-xs font-semibold text-white shadow">
             <CheckCircle2 className="h-4 w-4" />
             {t.verifiedTitle}
@@ -359,14 +448,35 @@ export default function GestureVerifier({
         </div>
       )}
 
+      {/* Live 5-Finger Status Pills */}
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {fingerStatuses.map((f) => (
+          <span
+            key={f.key}
+            className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold transition ${
+              cameraOn && f.ok
+                ? "bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300"
+                : "bg-slate-100 text-slate-600"
+            }`}
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${
+                cameraOn && f.ok ? "bg-emerald-500" : "bg-slate-400"
+              }`}
+            />
+            {f.label}
+          </span>
+        ))}
+      </div>
+
       {/* Confidence & Hold Progress */}
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
         <div className="rounded-xl bg-slate-50 p-3">
           <div className="mb-1 flex justify-between text-xs font-medium text-slate-600">
             <span>{t.confidenceLabel}</span>
             <span>{confidence}%</span>
           </div>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+          <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-200">
             <div
               className="h-full rounded-full bg-blue-600 transition-all duration-150"
               style={{ width: `${confidence}%` }}
@@ -379,7 +489,7 @@ export default function GestureVerifier({
             <span>{t.holdProgress}</span>
             <span>{holdPercent}%</span>
           </div>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+          <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-200">
             <div
               className="h-full rounded-full bg-emerald-500 transition-all duration-150"
               style={{ width: `${holdPercent}%` }}
