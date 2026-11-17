@@ -77,6 +77,12 @@ export default function GestureVerifier({
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
 
+  // Live refs prevent stale closures inside requestAnimationFrame!
+  const signRef = useRef<FslSign>(sign);
+  const langRef = useRef<Language>(lang);
+  const challengeModeRef = useRef<boolean>(challengeMode);
+  const onVerifiedRef = useRef(onVerified);
+
   const smoothedLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
   const prevLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
   const motionWindowRef = useRef<number[]>([]);
@@ -97,6 +103,22 @@ export default function GestureVerifier({
   );
   const [justVerified, setJustVerified] = useState(false);
 
+  useEffect(() => {
+    signRef.current = sign;
+  }, [sign]);
+
+  useEffect(() => {
+    langRef.current = lang;
+  }, [lang]);
+
+  useEffect(() => {
+    challengeModeRef.current = challengeMode;
+  }, [challengeMode]);
+
+  useEffect(() => {
+    onVerifiedRef.current = onVerified;
+  }, [onVerified]);
+
   const resetSignPractice = () => {
     streakRef.current = 0;
     motionWindowRef.current = [];
@@ -105,8 +127,8 @@ export default function GestureVerifier({
     setHoldPercent(0);
     setConfidence(0);
     setJustVerified(false);
-    setFingerStatuses(DEFAULT_FINGERS[lang]);
-    setFeedback(cameraOn ? t.noHandDetected : t.cameraReady);
+    setFingerStatuses(DEFAULT_FINGERS[langRef.current]);
+    setFeedback(cameraOn ? translations[langRef.current].noHandDetected : translations[langRef.current].cameraReady);
   };
 
   useEffect(() => {
@@ -136,7 +158,7 @@ export default function GestureVerifier({
     setHandInFrame(false);
     setHoldPercent(0);
     setConfidence(0);
-    setFingerStatuses(DEFAULT_FINGERS[lang]);
+    setFingerStatuses(DEFAULT_FINGERS[langRef.current]);
   };
 
   useEffect(() => {
@@ -148,6 +170,7 @@ export default function GestureVerifier({
   }, []);
 
   const logAttempt = async (
+    currentSign: FslSign,
     matched: boolean,
     conf: number,
     feedbackCode: string
@@ -159,8 +182,8 @@ export default function GestureVerifier({
 
     await supabase.from("practice_attempts").insert({
       session_id: sessionId,
-      sign_slug: sign.slug,
-      category: sign.category,
+      sign_slug: currentSign.slug,
+      category: currentSign.category,
       matched,
       confidence: Number(conf.toFixed(4)),
       feedback_code: feedbackCode,
@@ -250,7 +273,6 @@ export default function GestureVerifier({
       setLoadingModel(false);
 
       let lastVideoTime = -1;
-      const REQUIRED_STREAK = challengeMode ? 8 : 12;
 
       const detectFrame = () => {
         const video = videoRef.current;
@@ -258,6 +280,10 @@ export default function GestureVerifier({
         const landmarker = landmarkerRef.current;
 
         if (!video || !canvas || !landmarker || !streamRef.current) return;
+
+        const activeSign = signRef.current;
+        const activeLang = langRef.current;
+        const requiredStreak = challengeModeRef.current ? 8 : 10;
 
         if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
           lastVideoTime = video.currentTime;
@@ -291,7 +317,7 @@ export default function GestureVerifier({
             }
             const peakMotion = Math.max(...motionWindowRef.current, 0);
 
-            const analysis = analyzeGesture(lm, sign, peakMotion, lang);
+            const analysis = analyzeGesture(lm, activeSign, peakMotion, activeLang);
             setConfidence(Math.round(analysis.confidence * 100));
             setFeedback(analysis.feedbackMessage);
             setFingerStatuses(analysis.fingerStatuses);
@@ -301,24 +327,29 @@ export default function GestureVerifier({
             }
 
             if (analysis.matched) {
-              streakRef.current = Math.min(streakRef.current + 1, REQUIRED_STREAK);
-              const pct = Math.round((streakRef.current / REQUIRED_STREAK) * 100);
+              streakRef.current = Math.min(streakRef.current + 1, requiredStreak);
+              const pct = Math.round((streakRef.current / requiredStreak) * 100);
               setHoldPercent(pct);
 
               if (
-                streakRef.current >= REQUIRED_STREAK &&
+                streakRef.current >= requiredStreak &&
                 !verifiedCurrentSignRef.current
               ) {
                 verifiedCurrentSignRef.current = true;
                 setJustVerified(true);
-                onVerified(sign.slug);
-                void logAttempt(true, analysis.confidence, "ok");
+                onVerifiedRef.current(activeSign.slug);
+                void logAttempt(activeSign, true, analysis.confidence, "ok");
               }
             } else {
               streakRef.current = Math.max(streakRef.current - 2, 0);
-              setHoldPercent(Math.round((streakRef.current / REQUIRED_STREAK) * 100));
+              setHoldPercent(Math.round((streakRef.current / requiredStreak) * 100));
               if (!verifiedCurrentSignRef.current) {
-                void logAttempt(false, analysis.confidence, analysis.feedbackCode);
+                void logAttempt(
+                  activeSign,
+                  false,
+                  analysis.confidence,
+                  analysis.feedbackCode
+                );
               }
             }
           } else {
@@ -328,8 +359,8 @@ export default function GestureVerifier({
             streakRef.current = 0;
             setHoldPercent(0);
             setConfidence(0);
-            setFingerStatuses(DEFAULT_FINGERS[lang]);
-            setFeedback(t.noHandDetected);
+            setFingerStatuses(DEFAULT_FINGERS[activeLang]);
+            setFeedback(translations[activeLang].noHandDetected);
           }
         }
 
@@ -398,7 +429,6 @@ export default function GestureVerifier({
           className="pointer-events-none absolute inset-0 h-full w-full object-cover"
         />
 
-        {/* Signs-AI style Corner Framing Box */}
         {cameraOn && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8">
             <div
@@ -424,14 +454,12 @@ export default function GestureVerifier({
           </div>
         )}
 
-        {/* Frosted-Glass Live Feedback Caption (like signs-ai.com!) */}
         {cameraOn && !justVerified && (
           <div className="pointer-events-none absolute right-3 bottom-3 left-3 rounded-xl border border-white/15 bg-slate-950/65 px-3.5 py-2 text-center text-xs font-medium text-white backdrop-blur-md">
             {feedback}
           </div>
         )}
 
-        {/* Deaf-accessible Visual Celebration Overlay */}
         {justVerified && (
           <div className="absolute inset-x-3 bottom-3 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-emerald-600/95 px-4 py-3 text-white shadow-lg backdrop-blur-sm">
             <div className="flex items-center gap-2">

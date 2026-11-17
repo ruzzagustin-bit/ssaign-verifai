@@ -25,18 +25,38 @@ function dist(a: NormalizedLandmark, b: NormalizedLandmark): number {
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+// Measures bend angle at joint B (in degrees, ~180 = straight, <110 = curled)
+function jointAngleDeg(
+  a: NormalizedLandmark,
+  b: NormalizedLandmark,
+  c: NormalizedLandmark
+): number {
+  const bax = a.x - b.x;
+  const bay = a.y - b.y;
+  const baz = (a.z ?? 0) - (b.z ?? 0);
+  const bcx = c.x - b.x;
+  const bcy = c.y - b.y;
+  const bcz = (c.z ?? 0) - (b.z ?? 0);
+
+  const dot = bax * bcx + bay * bcy + baz * bcz;
+  const magBA = Math.sqrt(bax * bax + bay * bay + baz * baz) || 1e-6;
+  const magBC = Math.sqrt(bcx * bcx + bcy * bcy + bcz * bcz) || 1e-6;
+  const cos = Math.max(-1, Math.min(1, dot / (magBA * magBC)));
+  return (Math.acos(cos) * 180) / Math.PI;
+}
+
 function isFingerExtended(
   lm: NormalizedLandmark[],
   mcpIdx: number,
   pipIdx: number,
+  dipIdx: number,
   tipIdx: number
 ): boolean {
   const wrist = lm[0];
   const tipToWrist = dist(lm[tipIdx], wrist);
   const pipToWrist = dist(lm[pipIdx], wrist);
-  const tipToMcp = dist(lm[tipIdx], lm[mcpIdx]);
-  const pipToMcp = dist(lm[pipIdx], lm[mcpIdx]);
-  return tipToWrist > pipToWrist * 1.08 && tipToMcp > pipToMcp * 1.04;
+  const pipAngle = jointAngleDeg(lm[mcpIdx], lm[pipIdx], lm[dipIdx]);
+  return tipToWrist > pipToWrist * 1.05 && pipAngle > 135;
 }
 
 function isThumbExtended(lm: NormalizedLandmark[], palmSize: number): boolean {
@@ -45,10 +65,11 @@ function isThumbExtended(lm: NormalizedLandmark[], palmSize: number): boolean {
   const middleMcp = lm[9];
   const indexMcp = lm[5];
 
-  const farFromPinky = dist(thumbTip, pinkyMcp) > palmSize * 1.02;
-  const awayFromCenter = dist(thumbTip, middleMcp) > palmSize * 0.66;
-  const awayFromIndex = dist(thumbTip, indexMcp) > palmSize * 0.44;
-  return farFromPinky && (awayFromCenter || awayFromIndex);
+  const farFromPinky = dist(thumbTip, pinkyMcp) > palmSize * 0.96;
+  const awayFromCenter = dist(thumbTip, middleMcp) > palmSize * 0.62;
+  const awayFromIndex = dist(thumbTip, indexMcp) > palmSize * 0.42;
+  const thumbAngle = jointAngleDeg(lm[2], lm[3], lm[4]);
+  return farFromPinky && (awayFromCenter || awayFromIndex) && thumbAngle > 130;
 }
 
 function getOrientation(
@@ -131,10 +152,10 @@ export function analyzeGesture(
 
   const detected: Record<FingerKey, boolean> = {
     thumb: isThumbExtended(lm, palmSize),
-    index: isFingerExtended(lm, 5, 6, 8),
-    middle: isFingerExtended(lm, 9, 10, 12),
-    ring: isFingerExtended(lm, 13, 14, 16),
-    pinky: isFingerExtended(lm, 17, 18, 20),
+    index: isFingerExtended(lm, 5, 6, 7, 8),
+    middle: isFingerExtended(lm, 9, 10, 11, 12),
+    ring: isFingerExtended(lm, 13, 14, 15, 16),
+    pinky: isFingerExtended(lm, 17, 18, 19, 20),
   };
 
   const p = sign.profile;
@@ -150,8 +171,16 @@ export function analyzeGesture(
     }
   };
 
+  // For numbers 6, 7, 8, thumb bends in to touch a finger tip, so ignore rigid thumb state
+  const isNumberTouchSign =
+    sign.slug === "number-6" ||
+    sign.slug === "number-7" ||
+    sign.slug === "number-8";
+
   const fingerStatuses: FingerMatchStatus[] = fingerKeys.map((key) => {
-    const expected: FingerState = p[key];
+    const expected: FingerState =
+      isNumberTouchSign && key === "thumb" ? "any" : p[key];
+
     if (expected === "any") {
       return { key, label: FINGER_NAMES[key][lang], ok: true };
     }
@@ -181,11 +210,11 @@ export function analyzeGesture(
     return { key, label: FINGER_NAMES[key][lang], ok };
   });
 
-  // Extra distinction for Letter C (curved open gap between thumb & index)
+  // Special shape checks for FSL accuracy
   if (sign.slug === "alphabet-c") {
     totalChecks++;
     const gap = dist(lm[4], lm[8]) / palmSize;
-    if (gap > 0.36 && gap < 1.35) {
+    if (gap > 0.38 && gap < 1.4) {
       passedChecks++;
     } else {
       recordError(
@@ -196,10 +225,31 @@ export function analyzeGesture(
     }
   }
 
+  // Specific thumb-to-finger contact for 6, 7, 8
+  const touchMap: Record<string, { tip: number; nameEn: string; nameFil: string }> = {
+    "number-6": { tip: 20, nameEn: "pinky", nameFil: "hinliliit" },
+    "number-7": { tip: 16, nameEn: "ring finger", nameFil: "palasingsingan" },
+    "number-8": { tip: 12, nameEn: "middle finger", nameFil: "hinlalato" },
+  };
+  if (touchMap[sign.slug]) {
+    totalChecks++;
+    const target = touchMap[sign.slug];
+    const touchDist = dist(lm[4], lm[target.tip]) / palmSize;
+    if (touchDist < 0.55) {
+      passedChecks++;
+    } else {
+      recordError(
+        `touch_${sign.slug}`,
+        `Touch your thumb tip to your ${target.nameEn}.`,
+        `Pagdikitin ang dulo ng hinlalaki at ${target.nameFil}.`
+      );
+    }
+  }
+
   if (p.pinchThumbIndex) {
     totalChecks++;
     const pinchDist = dist(lm[4], lm[8]) / palmSize;
-    if (pinchDist < 0.45) {
+    if (pinchDist < 0.48) {
       passedChecks++;
     } else {
       recordError(
@@ -213,7 +263,7 @@ export function analyzeGesture(
   if (typeof p.spreadIndexMiddle === "boolean") {
     totalChecks++;
     const spreadDist = dist(lm[8], lm[12]) / palmSize;
-    const isSpread = spreadDist > 0.36;
+    const isSpread = spreadDist > 0.34;
     if (isSpread === p.spreadIndexMiddle) {
       passedChecks++;
     } else if (p.spreadIndexMiddle) {
@@ -252,7 +302,7 @@ export function analyzeGesture(
 
   if (p.requiresMotion) {
     totalChecks++;
-    if (recentPeakMotion > 0.055) {
+    if (recentPeakMotion > 0.05) {
       passedChecks++;
     } else {
       recordError(

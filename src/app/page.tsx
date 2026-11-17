@@ -33,7 +33,7 @@ import {
 } from "@/lib/gamification";
 import GestureVerifier from "@/components/GestureVerifier";
 import EvaluationForm from "@/components/EvaluationForm";
-import SigningAvatar from "@/components/SigningAvatar";
+import Avatar3D from "@/components/Avatar3D";
 
 const INITIAL_GAME_STATE: GamificationState = {
   xp: 0,
@@ -79,7 +79,7 @@ export default function HomePage() {
       try {
         setVerifiedSlugs(JSON.parse(savedVerified));
       } catch {
-        // ignore
+        // ignore invalid storage
       }
     }
 
@@ -88,7 +88,7 @@ export default function HomePage() {
       try {
         setGame(JSON.parse(savedGame));
       } catch {
-        // ignore
+        // ignore invalid storage
       }
     }
 
@@ -100,7 +100,9 @@ export default function HomePage() {
         .not("video_url", "is", null);
 
       if (data && data.length > 0) {
-        const urlMap = new Map(data.map((r) => [r.slug, r.video_url as string]));
+        const urlMap = new Map(
+          data.map((r) => [r.slug, r.video_url as string])
+        );
         setSigns((prev) =>
           prev.map((s) => ({
             ...s,
@@ -139,7 +141,9 @@ export default function HomePage() {
     if (mode === "challenge" && challengeQueue.length > 0) {
       return challengeQueue[challengeIndex] ?? categorySigns[0];
     }
-    return categorySigns.find((s) => s.slug === selectedSlug) ?? categorySigns[0];
+    return (
+      categorySigns.find((s) => s.slug === selectedSlug) ?? categorySigns[0]
+    );
   }, [mode, challengeQueue, challengeIndex, categorySigns, selectedSlug]);
 
   const rank = useMemo(() => getRankInfo(game.xp, lang), [game.xp, lang]);
@@ -308,7 +312,6 @@ export default function HomePage() {
 
                 {/* Gamification HUD Cards */}
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                  {/* Rank & XP */}
                   <div className="col-span-2 rounded-2xl border border-white/15 bg-white/10 p-3.5 backdrop-blur-sm sm:col-span-1">
                     <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
                       <Zap className="h-4 w-4" />
@@ -327,7 +330,6 @@ export default function HomePage() {
                     </div>
                   </div>
 
-                  {/* Combo Streak */}
                   <div className="rounded-2xl border border-white/15 bg-white/10 p-3.5 backdrop-blur-sm">
                     <div className="flex items-center gap-1.5 text-xs font-medium text-orange-200">
                       <Flame className="h-4 w-4 text-orange-400" />
@@ -339,7 +341,6 @@ export default function HomePage() {
                     </p>
                   </div>
 
-                  {/* Badges Button */}
                   <button
                     type="button"
                     onClick={() => setShowBadges((prev) => !prev)}
@@ -560,7 +561,7 @@ export default function HomePage() {
 
             {/* Split-Screen Studio Stage */}
             <section className="grid gap-6 lg:grid-cols-2">
-              {/* Left: Instructional Reference Video OR Animated Studio Character */}
+              {/* Left: Instructional Reference Video OR 3D Avatar */}
               <div className="flex flex-col rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -591,7 +592,7 @@ export default function HomePage() {
                     className="aspect-video w-full rounded-2xl bg-slate-950 object-contain"
                   />
                 ) : (
-                  <SigningAvatar sign={selectedSign} lang={lang} />
+                  <Avatar3D sign={selectedSign} lang={lang} />
                 )}
 
                 <div className="mt-4 space-y-3">
