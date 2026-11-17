@@ -41,6 +41,7 @@ interface GestureVerifierProps {
   isAlreadyVerified: boolean;
   onVerified: (slug: string) => void;
   onNextSign?: () => void;
+  challengeMode?: boolean;
 }
 
 const DEFAULT_FINGERS: Record<Language, FingerMatchStatus[]> = {
@@ -67,6 +68,7 @@ export default function GestureVerifier({
   isAlreadyVerified,
   onVerified,
   onNextSign,
+  challengeMode = false,
 }: GestureVerifierProps) {
   const t = translations[lang];
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -86,6 +88,7 @@ export default function GestureVerifier({
   const [cameraOn, setCameraOn] = useState(false);
   const [loadingModel, setLoadingModel] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [handInFrame, setHandInFrame] = useState(false);
   const [confidence, setConfidence] = useState(0);
   const [holdPercent, setHoldPercent] = useState(0);
   const [feedback, setFeedback] = useState<string>(t.noHandDetected);
@@ -130,6 +133,7 @@ export default function GestureVerifier({
     smoothedLandmarksRef.current = null;
     prevLandmarksRef.current = null;
     setCameraOn(false);
+    setHandInFrame(false);
     setHoldPercent(0);
     setConfidence(0);
     setFingerStatuses(DEFAULT_FINGERS[lang]);
@@ -246,7 +250,7 @@ export default function GestureVerifier({
       setLoadingModel(false);
 
       let lastVideoTime = -1;
-      const REQUIRED_STREAK = 12;
+      const REQUIRED_STREAK = challengeMode ? 8 : 12;
 
       const detectFrame = () => {
         const video = videoRef.current;
@@ -273,6 +277,7 @@ export default function GestureVerifier({
           }
 
           if (result.landmarks && result.landmarks.length > 0) {
+            setHandInFrame(true);
             const rawLm = result.landmarks[0];
             const lm = smoothLandmarks(smoothedLandmarksRef.current, rawLm, 0.55);
             smoothedLandmarksRef.current = lm;
@@ -317,6 +322,7 @@ export default function GestureVerifier({
               }
             }
           } else {
+            setHandInFrame(false);
             smoothedLandmarksRef.current = null;
             prevLandmarksRef.current = null;
             streakRef.current = 0;
@@ -343,7 +349,7 @@ export default function GestureVerifier({
     <div className="flex flex-col rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <Sparkles className="h-5 w-5 text-blue-700" />
+          <Sparkles className="h-5 w-5 text-violet-700" />
           <h3 className="text-lg font-semibold text-slate-900">
             {t.cameraPanelTitle}
           </h3>
@@ -354,7 +360,7 @@ export default function GestureVerifier({
             type="button"
             onClick={startCamera}
             disabled={loadingModel}
-            className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-blue-800 disabled:opacity-60"
+            className="inline-flex items-center gap-2 rounded-xl bg-violet-700 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-violet-800 disabled:opacity-60"
           >
             {loadingModel ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -375,9 +381,9 @@ export default function GestureVerifier({
         )}
       </div>
 
-      {/* Camera Viewport */}
+      {/* Studio Camera Viewport with Framing Box & Frosted Captions */}
       <div
-        className={`relative aspect-video w-full overflow-hidden rounded-xl bg-slate-950 transition-all ${
+        className={`relative aspect-video w-full overflow-hidden rounded-2xl bg-slate-950 transition-all ${
           justVerified ? "ring-4 ring-emerald-400" : ""
         }`}
       >
@@ -392,12 +398,36 @@ export default function GestureVerifier({
           className="pointer-events-none absolute inset-0 h-full w-full object-cover"
         />
 
+        {/* Signs-AI style Corner Framing Box */}
+        {cameraOn && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8">
+            <div
+              className={`h-full w-3/5 max-w-[260px] rounded-3xl border-2 border-dashed transition-colors duration-300 ${
+                justVerified
+                  ? "border-emerald-400 bg-emerald-500/10"
+                  : handInFrame
+                    ? "border-sky-400/80"
+                    : "border-white/40"
+              }`}
+            />
+          </div>
+        )}
+
         {!cameraOn && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-slate-300">
-            <Camera className="mb-3 h-10 w-10 text-slate-400" />
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-b from-slate-900 to-indigo-950 p-6 text-center text-slate-200">
+            <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl border border-white/20 bg-white/10 backdrop-blur">
+              <Camera className="h-7 w-7 text-violet-300" />
+            </div>
             <p className="max-w-xs text-sm">
               {loadingModel ? t.loadingModel : t.cameraReady}
             </p>
+          </div>
+        )}
+
+        {/* Frosted-Glass Live Feedback Caption (like signs-ai.com!) */}
+        {cameraOn && !justVerified && (
+          <div className="pointer-events-none absolute right-3 bottom-3 left-3 rounded-xl border border-white/15 bg-slate-950/65 px-3.5 py-2 text-center text-xs font-medium text-white backdrop-blur-md">
+            {feedback}
           </div>
         )}
 
@@ -412,14 +442,16 @@ export default function GestureVerifier({
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={resetSignPractice}
-                className="inline-flex items-center gap-1 rounded-lg bg-white/20 px-2.5 py-1.5 text-xs font-semibold hover:bg-white/30"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                {lang === "en" ? "Retry" : "Ulitin"}
-              </button>
+              {!challengeMode && (
+                <button
+                  type="button"
+                  onClick={resetSignPractice}
+                  className="inline-flex items-center gap-1 rounded-lg bg-white/20 px-2.5 py-1.5 text-xs font-semibold hover:bg-white/30"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  {lang === "en" ? "Retry" : "Ulitin"}
+                </button>
+              )}
               {onNextSign && (
                 <button
                   type="button"
@@ -434,7 +466,7 @@ export default function GestureVerifier({
           </div>
         )}
 
-        {!justVerified && isAlreadyVerified && (
+        {!justVerified && isAlreadyVerified && !challengeMode && (
           <div className="absolute top-3 right-3 inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-3 py-1 text-xs font-semibold text-white shadow">
             <CheckCircle2 className="h-4 w-4" />
             {t.verifiedTitle}
@@ -478,7 +510,7 @@ export default function GestureVerifier({
           </div>
           <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-200">
             <div
-              className="h-full rounded-full bg-blue-600 transition-all duration-150"
+              className="h-full rounded-full bg-violet-600 transition-all duration-150"
               style={{ width: `${confidence}%` }}
             />
           </div>
@@ -496,17 +528,6 @@ export default function GestureVerifier({
             />
           </div>
         </div>
-      </div>
-
-      {/* Real-time Corrective Feedback Banner */}
-      <div
-        className={`mt-3 rounded-xl border p-3.5 text-sm font-medium ${
-          justVerified
-            ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-            : "border-blue-100 bg-blue-50 text-blue-900"
-        }`}
-      >
-        {justVerified ? `${t.verifiedTitle} — ${t.verifiedSub}` : feedback}
       </div>
     </div>
   );
